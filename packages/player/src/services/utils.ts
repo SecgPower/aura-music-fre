@@ -21,45 +21,18 @@ export const shuffleArray = <T>(array: T[]): T[] => {
   return newArr;
 };
 
-// Helper to request via CORS proxy (api.allorigins.win is reliable for GET requests)
-// Try direct request first, fallback to proxy if CORS fails
-export const fetchViaProxy = async (targetUrl: string): Promise<any> => {
-  let text: string;
-
-  // 1. Try direct request first
-  try {
-    const response = await fetch(targetUrl);
-    if (!response.ok) {
-      throw new Error(
-        `Direct fetch failed with status: ${response.status} ${targetUrl}`,
-      );
-    }
-    text = await response.text();
-    return JSON.parse(text);
-  } catch (directError) {
-    // 2. Direct request failed (likely CORS), try proxy
-    console.warn(
-      "Direct fetch failed (likely CORS), trying proxy:",
-      directError,
+// Fetch JSON directly from a CORS-enabled API instance.
+// Issue #9: the old api.allorigins.win fallback proxy is offline, and public
+// CORS proxies are unreliable, so API instances must send CORS headers
+// themselves (the instance list lives in lyricsService.ts).
+export const fetchJson = async (targetUrl: string): Promise<any> => {
+  const response = await fetch(targetUrl);
+  if (!response.ok) {
+    throw new Error(
+      `Fetch failed with status: ${response.status} ${targetUrl}`,
     );
-
-    try {
-      const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
-      const response = await fetch(proxyUrl);
-      if (!response.ok) {
-        throw new Error(`Proxy fetch failed with status: ${response.status}`);
-      }
-      text = await response.text();
-      return JSON.parse(text);
-    } catch (proxyError) {
-      console.error(
-        "Both direct and proxy requests failed:",
-        proxyError,
-        targetUrl,
-      );
-      throw proxyError;
-    }
   }
+  return JSON.parse(await response.text());
 };
 
 export const parseNeteaseLink = (

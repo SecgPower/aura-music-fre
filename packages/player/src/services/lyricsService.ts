@@ -1,9 +1,25 @@
-import { fetchViaProxy } from "./utils";
+import { fetchJson } from "./utils";
 import { isMetadataLine } from "@aura-music/lyrics/parser/types";
 
+// Issue #9: the previous single instance (neteaseapi.gksm.store) returns 404
+// for some tracks when reached from a non-China egress, so keep an ordered
+// instance list and rotate on failure. zm.wwoyun.cn is hosted in China
+// (Ningbo), so overseas users still get a China egress through it.
+const API_BASES = ["https://zm.wwoyun.cn", "https://neteaseapi.gksm.store"];
 const METING_API = "https://api.qijieya.cn/meting/";
-const NETEASECLOUD_API_BASE = "https://neteaseapi.gksm.store";
-const NETEASE_SEARCH_API = `${NETEASECLOUD_API_BASE}/cloudsearch`;
+
+const requestApi = async (path: string): Promise<any> => {
+  let lastErr: unknown;
+  for (const base of API_BASES) {
+    try {
+      return await fetchJson(`${base}${path}`);
+    } catch (err) {
+      lastErr = err;
+      console.warn(`NetEase API instance failed: ${base}`, err);
+    }
+  }
+  throw lastErr;
+};
 const TTML_DB_BASE = "https://amll-ttml-db.stevexmh.net";
 
 const TIMESTAMP_REGEX = /^\[(\d{2}):(\d{2})(?:[\.:](\d{2,3}))?\](.*)$/;
@@ -364,12 +380,12 @@ export const searchNetEase = async (
   options: SearchOptions = {},
 ): Promise<NeteaseTrackInfo[]> => {
   const { limit = 20, offset = 0 } = options;
-  const searchApiUrl = `${NETEASE_SEARCH_API}?keywords=${encodeURIComponent(
+  const searchApiUrl = `/cloudsearch?keywords=${encodeURIComponent(
     keyword,
   )}&limit=${limit}&offset=${offset}`;
 
   try {
-    const parsedSearchApiResponse = (await fetchViaProxy(
+    const parsedSearchApiResponse = (await requestApi(
       searchApiUrl,
     )) as NeteaseSearchResponse;
     const songs = parsedSearchApiResponse.result?.songs ?? [];
@@ -397,8 +413,9 @@ export const fetchNeteasePlaylist = async (
     let shouldContinue = true;
 
     while (shouldContinue) {
-      const url = `${NETEASECLOUD_API_BASE}/playlist/track/all?id=${playlistId}&limit=${limit}&offset=${offset}`;
-      const data = (await fetchViaProxy(url)) as NeteasePlaylistResponse;
+      const data = (await requestApi(
+        `/playlist/track/all?id=${playlistId}&limit=${limit}&offset=${offset}`,
+      )) as NeteasePlaylistResponse;
       const songs = data.songs ?? [];
       if (songs.length === 0) {
         break;
@@ -427,8 +444,9 @@ export const fetchNeteaseSong = async (
   songId: string,
 ): Promise<NeteaseTrackInfo | null> => {
   try {
-    const url = `${NETEASECLOUD_API_BASE}/song/detail?ids=${songId}`;
-    const data = (await fetchViaProxy(url)) as NeteaseSongDetailResponse;
+    const data = (await requestApi(
+      `/song/detail?ids=${songId}`,
+    )) as NeteaseSongDetailResponse;
     const track = data.songs?.[0];
     if (data.code === 200 && track) {
       return mapNeteaseSongToTrack(track);
@@ -472,9 +490,8 @@ export const fetchLyricsById = async (
     const [ttmlContent, lyricDataResult] = await Promise.all([
       fetchTtmlByNeteaseId(songId),
       (async () => {
-        const lyricUrl = `${NETEASECLOUD_API_BASE}/lyric/new?id=${songId}`;
         try {
-          return await fetchViaProxy(lyricUrl);
+          return await requestApi(`/lyric/new?id=${songId}`);
         } catch (err) {
           console.error("Lyric fetch error", err);
           return null;
