@@ -22,6 +22,7 @@ interface Dict {
     descEnd: string;
     viewGitHub: string;
     createdBy: string;
+    remakeBy:string;
     done: string;
   };
   top: {
@@ -144,10 +145,11 @@ export const dicts: Record<Lang, Dict> = {
     },
     about: {
       descStart: "An experimental, pure web music player crafted with",
-      descEmphasis: "Vibe Coding",
+      descEmphasis: "VC",
       descEnd: "technology.",
       viewGitHub: "View on GitHub",
       createdBy: "Created by dingyi222666",
+      remakeBy: "Remaked and fixed by SecgPower",
       done: "Done",
     },
     top: {
@@ -268,11 +270,12 @@ export const dicts: Record<Lang, Dict> = {
       importOk: (count) => `已成功导入 ${count} 首歌曲`,
     },
     about: {
-      descStart: "一款采用",
-      descEmphasis: "Vibe Coding",
-      descEnd: "打造的实验性纯网页音乐播放器。",
+      descStart: "一款原采用",
+      descEmphasis: "VC",
+      descEnd: "打造的实验性音乐播放器",
       viewGitHub: "在 GitHub 上查看",
       createdBy: "由 dingyi222666 创建",
+      remakeBy: "由 SecgPower 修改",
       done: "完成",
     },
     top: {

@@ -18,8 +18,10 @@ const AboutDialog: React.FC<AboutDialogProps> = ({ isOpen, onClose }) => {
       <p className="glass-caption mt-1">Version {manifest.version}</p>
       <p className="glass-description mt-5">{dict.about.descStart}<strong> {dict.about.descEmphasis} </strong>{dict.about.descEnd}</p>
       <div className="glass-links mt-5">
-        <a href="https://github.com/dingyi222666/aura-music" target="_blank" rel="noreferrer">{dict.about.viewGitHub}</a>
+        <a href="https://github.com/dingyi222666/aura-music" target="_blank" rel="noreferrer">查看本家</a>
+        <a href="https://github.com/SecgPower/aura-music" target="_blank" rel="noreferrer">{dict.about.viewGitHub}</a>
         <a href="https://github.com/dingyi222666" target="_blank" rel="noreferrer">{dict.about.createdBy}</a>
+        <a href="https://github.com/SecgPower" target="_blank" rel="noreferrer">{dict.about.remakeBy}</a>
       </div>
       <p className="glass-caption mt-5 text-xs">Gemini 3.5 Flash / GPT 6 Astra / Claude Fable 5.1</p>
     </div>

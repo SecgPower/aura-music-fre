@@ -13,6 +13,19 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 3000,
       host: "0.0.0.0",
+      allowedHosts: ["shunxserver.yearnplayground.dpdns.org", "aura-music.yearnplayground.dpdns.org"],
+      proxy: {
+    '/amll-lyrics': {
+      target: 'https://amll-ttml-db.stevexmh.net',
+      changeOrigin: true,
+      rewrite: (path) => path.replace(/^\/amll-lyrics/, '')
+    },'/api/netease': {
+      target: 'https://neteaseapi.gksm.store',
+      changeOrigin: true,
+      secure: true,
+      rewrite: (p) => p.replace(/^\/api\/netease/, '')
+    }
+  },
     },
     plugins: [
       react(),

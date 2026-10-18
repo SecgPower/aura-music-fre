@@ -1,6 +1,12 @@
 import GlassMaterial from "../glass/GlassMaterial";
 import { GlassMenu } from "../glass/GlassDialog";
-import React, { useState, useEffect, useLayoutEffect, useRef } from "react";
+import React, {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+} from "react";
 import { createPortal } from "react-dom";
 import { SearchIcon, PlayIcon, PlusIcon } from "./Icons";
 import SmartImage from "./SmartImage";
@@ -72,6 +78,280 @@ const ANIMATION_STYLES = `
   .macos-modal-out { animation: modal-out 0.15s cubic-bezier(0.32, 0.72, 0, 1) forwards; will-change: transform, opacity; }
 `;
 
+/* -------------------------------------------------------------------------- *
+ * 网易云搜索原始报文 → NeteaseTrackInfo
+ * 报文形如：{ "result": { "songs": [ { id, name, artists[], album{}, duration, ... } ] } }
+ * -------------------------------------------------------------------------- */
+
+interface NeteaseRawArtist {
+  id?: number;
+  name?: string;
+  alias?: string[];
+  picUrl?: string | null;
+  img1v1Url?: string | null;
+  img1v1?: number;
+}
+
+interface NeteaseRawAlbum {
+  id?: number;
+  name?: string;
+  size?: number;
+  picId?: number;
+  picUrl?: string | null;
+  blurPicUrl?: string | null;
+  img1v1Url?: string | null;
+  publishTime?: number;
+  artist?: NeteaseRawArtist;
+}
+
+interface NeteaseRawSong {
+  id?: number;
+  name?: string;
+  alias?: string[];
+  transNames?: string[];
+  duration?: number;
+  fee?: number;
+  mvid?: number;
+  copyrightId?: number;
+  artists?: NeteaseRawArtist[];
+  album?: NeteaseRawAlbum;
+}
+
+interface NeteaseRawSearchResponse {
+  code?: number;
+  result?: { songs?: NeteaseRawSong[]; songCount?: number } | null;
+  songs?: NeteaseRawSong[];
+}
+
+/** 归一化后的条目：保留 duration / fee 等原始字段，方便列表里直接展示 */
+type NeteaseTrack = NeteaseTrackInfo & {
+  duration?: number;
+  fee?: number;
+  alias?: string[];
+  publishTime?: number;
+};
+
+/** 自建/托管的网易云 API 基址，用于按歌曲 id 补封面 */
+const NETEASE_API_BASE = "https://netease-api.yearnplayground.dpdns.org";
+/** 网易云的灰色默认头像，出现即视为“没有封面” */
+const NETEASE_PLACEHOLDER_PIC = "5639395138885805";
+/** 每批最多请求多少个 id，避免 URL 过长 */
+const DETAIL_BATCH_SIZE = 20;
+
+const toHttps = (url?: string | null): string =>
+  url ? url.replace(/^http:\/\//, "https://").replace(/^http:/, "https:") : "";
+
+/** 网易云图床支持 ?param=WyH 裁剪，原图动辄 3000px，列表里必须缩一下 */
+const withSize = (url: string, size: number): string => {
+  if (!url) return "";
+  return url.includes("?") ? url : `${url}?param=${size}y${size}`;
+};
+
+/** 空串 / 默认灰头都算没有封面，需要走 /song/detail 补一次 */
+const isUsableCover = (url?: string | null): boolean =>
+  !!url && !url.includes(NETEASE_PLACEHOLDER_PIC);
+
+const formatDuration = (ms?: number): string => {
+  if (!ms || ms <= 0) return "";
+  const total = Math.round(ms / 1000);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+};
+
+/**
+ * 封面 URL：album.picId 无法直接拼出 CDN 地址，所以优先取报文自带的
+ * picUrl / blurPicUrl，都没有时退回歌手头像，再没有就留空（列表显示音符占位）。
+ * 如果你的搜索接口不返回 picUrl，可以用 /api/song/detail?ids=[id] 补一次，
+ * 或直接让后端把 picUrl 带出来。
+ */
+const resolveCoverUrl = (song: NeteaseRawSong): string => {
+  const album = song.album;
+  const artist = song.artists?.[0] ?? album?.artist;
+  const raw =
+    toHttps(album?.picUrl) ||
+    toHttps(album?.blurPicUrl) ||
+    toHttps(album?.img1v1Url) ||
+    toHttps(artist?.picUrl) ||
+    toHttps(artist?.img1v1Url) ||
+    "";
+  // 灰色默认头像等价于没图，直接丢弃，交给 /song/detail 补
+  return isUsableCover(raw) ? raw : "";
+};
+
+const mapRawSong = (song: NeteaseRawSong): NeteaseTrack => {
+  const id = Number(song.id);
+  const names = (song.artists ?? [])
+    .map((a) => a.name?.trim())
+    .filter((n): n is string => !!n);
+  return {
+    id: String(id),
+    neteaseId: id,
+    title: song.name?.trim() || "",
+    artist: names.length
+      ? names.join(" / ")
+      : (song.album?.artist?.name?.trim() ?? ""),
+    album: song.album?.name?.trim() ?? "",
+    coverUrl: resolveCoverUrl(song),
+    duration: song.duration,
+    fee: song.fee,
+    alias: song.alias ?? song.transNames ?? [],
+    publishTime: song.album?.publishTime,
+  };
+};
+
+const isRawSong = (item: unknown): item is NeteaseRawSong => {
+  if (!item || typeof item !== "object") return false;
+  const v = item as Record<string, unknown>;
+  return !("title" in v) && ("name" in v || "artists" in v || "album" in v);
+};
+
+/**
+ * 兼容三种输入：
+ *   - { result: { songs: [...] } }  —— /api/search/get/web 原始报文
+ *   - { songs: [...] }              —— 去掉 result 外壳的情况
+ *   - NeteaseTrackInfo[]            —— 已归一化过的旧数据，原样返回
+ */
+const parseNeteaseSearch = (input: unknown): NeteaseTrack[] => {
+  if (!input) return [];
+  let list: unknown[] | undefined;
+  if (Array.isArray(input)) {
+    list = input;
+  } else {
+    const obj = input as NeteaseRawSearchResponse;
+    if (Array.isArray(obj.result?.songs)) list = obj.result!.songs;
+    else if (Array.isArray(obj.songs)) list = obj.songs;
+  }
+  if (!list) return [];
+  return list.reduce<NeteaseTrack[]>((acc, item) => {
+    if (!item || typeof item !== "object") return acc;
+    if (isRawSong(item)) {
+      const track = mapRawSong(item);
+      // 丢掉没有有效 id 的脏数据（如 id 为 null 的条目）
+      if (toTrackId(track) > 0) acc.push(track);
+    } else {
+      // 已归一化过的旧数据：补齐 coverUrl，并把 id 强制归一成 number/string
+      const known = item as NeteaseTrack;
+      const numericId = Number(known.neteaseId ?? known.id);
+      acc.push({
+        ...known,
+        id: String(known.id ?? known.neteaseId ?? ""),
+        neteaseId: numericId,
+        coverUrl: isUsableCover(known.coverUrl) ? toHttps(known.coverUrl) : "",
+      });
+    }
+    return acc;
+  }, []);
+};
+
+/**
+ * id 归一：透传分支里 neteaseId 可能是字符串（如 '521416693'），
+ * 直接用会让 Number.isFinite 判 false 而被整批过滤掉，所以统一转 number。
+ */
+const toTrackId = (t: NeteaseTrack): number => {
+  const n = Number(t.neteaseId ?? t.id);
+  return Number.isFinite(n) ? n : 0;
+};
+
+/** detailMap / requestedIds 的统一 key，一律用字符串 */
+const trackKey = (t: NeteaseTrack): string => String(t.id ?? t.neteaseId ?? "");
+
+/**
+ * 是否需要回查详情：封面、歌手、专辑三者缺一就需要。
+ * 搜索报文的 album.name 常是空串（只有 picId），专辑名必须靠 /song/detail 补。
+ */
+const needsDetail = (
+  t: NeteaseTrack,
+  detailMap: Record<string, NeteaseTrackPatch>,
+): boolean => {
+  const patch = detailMap[trackKey(t)] ?? {};
+  const hasCover = isUsableCover(patch.coverUrl) || isUsableCover(t.coverUrl);
+  const hasArtist = !!(patch.artist || t.artist);
+  const hasAlbum = !!(patch.album || t.album);
+  return !hasCover || !hasArtist || !hasAlbum;
+};
+
+/** 单条调试摘要：id + 歌名 + 三个字段各自的来源情况 */
+const describeTrack = (t: NeteaseTrack): string =>
+  `${toTrackId(t)} ${t.title} → cover=${t.coverUrl || "（无）"} | artist=${t.artist || "（无）"} | album=${t.album || "（无）"}`;
+
+/* -------------------------------------------------------------------------- *
+ * 元数据补全：搜索报文里只有 album.picId（拼不出图床直链），且 album.name 常为空，
+ * 所以按 id 回查一次详情，补齐 封面 / 歌手 / 专辑
+ * GET {NETEASE_API_BASE}/song/detail?ids=id1,id2,...
+ *   → songs[].al.picUrl（封面）、songs[].al.name（专辑）、songs[].ar[].name（歌手）
+ * 注意：该接口的 ids 是逗号分隔的裸数字，不是 JSON 数组 / 中括号包裹
+ * -------------------------------------------------------------------------- */
+
+interface NeteaseSongDetail {
+  id?: number;
+  al?: { id?: number; name?: string | null; picUrl?: string | null; pic_str?: string; pic?: number } | null;
+  ar?: { id?: number; name?: string | null }[] | null;
+}
+
+/** 一次详情回查能补出来的字段，全部可选——只覆盖搜索报文里缺的那部分 */
+interface NeteaseTrackPatch {
+  coverUrl?: string;
+  artist?: string;
+  album?: string;
+}
+
+/** 调试开关：关掉后所有补全相关日志静默 */
+const NETEASE_COVER_DEBUG = true;
+
+const coverLog = (...args: unknown[]): void => {
+  if (NETEASE_COVER_DEBUG) console.log("[NeteaseCover]", ...args);
+};
+
+/** 拉一批歌曲详情，返回 { 歌曲id: 补丁 }；失败时返回空对象，不影响列表渲染 */
+const fetchSongDetails = async (
+  ids: number[],
+): Promise<Record<string, NeteaseTrackPatch>> => {
+  if (!ids.length) {
+    coverLog("skip: 没有需要回查的 id");
+    return {};
+  }
+  const query = ids.join(",");
+  const url = `${NETEASE_API_BASE}/song/detail?ids=${query}`;
+  coverLog(`fetchSongDetails 收到 ${ids.length} 个 id:`, ids);
+  coverLog("拼接 URL:", url);
+  try {
+    const res = await fetch(url);
+    coverLog("响应状态:", res.status, res.ok ? "OK" : "非 2xx，放弃本批");
+    if (!res.ok) return {};
+    const json = (await res.json()) as { songs?: NeteaseSongDetail[] | null };
+    const patches: Record<string, NeteaseTrackPatch> = {};
+    for (const song of json.songs ?? []) {
+      if (!song?.id) continue;
+      const key = String(song.id);
+      const patch: NeteaseTrackPatch = {};
+
+      const pic = toHttps(song.al?.picUrl ?? "");
+      if (isUsableCover(pic)) patch.coverUrl = pic;
+
+      // 专辑名：搜索报文的 album.name 经常是空串，这里才是准的
+      const albumName = song.al?.name?.trim();
+      if (albumName) patch.album = albumName;
+
+      // 歌手：多歌手用 " / " 拼，和搜索报文保持一致的展示格式
+      const names = (song.ar ?? [])
+        .map((a) => a?.name?.trim())
+        .filter((n): n is string => !!n);
+      if (names.length) patch.artist = names.join(" / ");
+
+      if (Object.keys(patch).length) patches[key] = patch;
+    }
+    coverLog(
+      `解析完成：接口返回 ${json.songs?.length ?? 0} 首，可用补丁 ${Object.keys(patches).length} 条`,
+      patches,
+    );
+    const missing = ids.filter((id) => !patches[String(id)]);
+    if (missing.length) coverLog("以下 id 没拿到任何详情:", missing);
+    return patches;
+  } catch (err) {
+    coverLog("请求失败:", err);
+    return {};
+  }
+};
+
 const SearchModal: React.FC<SearchModalProps> = ({
   isOpen,
   onClose,
@@ -102,6 +382,97 @@ const SearchModal: React.FC<SearchModalProps> = ({
     isPlaying,
     isOpen,
   });
+
+  // 云端搜索结果归一化：把 { result: { songs: [...] } } 原始报文转成 NeteaseTrackInfo
+  const neteaseTracks = useMemo(
+    () => parseNeteaseSearch(search.neteaseProvider.results),
+    [search.neteaseProvider.results],
+  );
+
+  // 回查到的元数据缓存 { 歌曲id: {封面/歌手/专辑} }，跨搜索复用
+  const [detailMap, setDetailMap] = useState<Record<string, NeteaseTrackPatch>>({});
+  // 已经请求过的 id，无论成败都不再重复请求（避免失败时无限重试）
+  const requestedIds = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    coverLog(
+      `搜索结果 ${neteaseTracks.length} 首，已缓存详情 ${Object.keys(detailMap).length} 条，已请求过 ${requestedIds.current.size} 个 id`,
+    );
+    coverLog(
+      "本轮结果 id 列表:",
+      neteaseTracks.map(toTrackId),
+      "(类型: " + (neteaseTracks[0] ? typeof neteaseTracks[0].neteaseId : "-") + ")",
+    );
+    coverLog("逐条字段情况:\n" + neteaseTracks.map(describeTrack).join("\n"));
+    const missing = neteaseTracks
+      .filter((t) => needsDetail(t, detailMap) && !requestedIds.current.has(trackKey(t)))
+      .map(toTrackId)
+      .filter((id) => Number.isFinite(id) && id > 0);
+    coverLog(
+      "需要回查详情的 id:",
+      missing.length ? missing : "（无，封面/歌手/专辑均已齐）",
+    );
+    if (!missing.length) return;
+
+    missing.forEach((id) => requestedIds.current.add(String(id)));
+    let alive = true;
+
+    // 分批并发，避免单次 URL 过长
+    const batches: number[][] = [];
+    for (let i = 0; i < missing.length; i += DETAIL_BATCH_SIZE) {
+      batches.push(missing.slice(i, i + DETAIL_BATCH_SIZE));
+    }
+    if (batches.length > 1) coverLog(`分成 ${batches.length} 批并发请求`);
+    Promise.all(batches.map(fetchSongDetails))
+      .then((results) => {
+        if (!alive) {
+          coverLog("组件已卸载/切换，丢弃本轮结果");
+          return;
+        }
+        const merged = results.reduce<Record<string, NeteaseTrackPatch>>(
+          (acc, m) => Object.assign(acc, m),
+          {},
+        );
+        coverLog("合并后新增详情:", Object.keys(merged).length, "条", merged);
+        if (Object.keys(merged).length) setDetailMap((prev) => ({ ...prev, ...merged }));
+      })
+      .catch((err) => coverLog("批次请求异常:", err));
+
+    return () => {
+      alive = false;
+    };
+  }, [neteaseTracks, detailMap]);
+
+  /**
+   * 列表与播放器统一从这里取最终展示值：
+   * 回查结果优先，缺失部分再退回搜索报文自带。
+   */
+  const resolveTrackMeta = useMemo(
+    () =>
+      (
+        track: NeteaseTrack,
+      ): { cover: string; coverRaw: string; artist: string; album: string } => {
+        const patch = detailMap[trackKey(track)] ?? {};
+        const coverRaw = isUsableCover(patch.coverUrl)
+          ? patch.coverUrl!
+          : track.coverUrl || "";
+        return {
+          coverRaw,
+          cover: withSize(coverRaw, 100),
+          artist: patch.artist || track.artist || "",
+          album: patch.album || track.album || "",
+        };
+      },
+    [detailMap],
+  );
+
+  /** 播放器要高清封面，单独给一个带尺寸的版本 */
+  const resolveLargeCover = useMemo(
+    () =>
+      (track: NeteaseTrack, size = 500): string =>
+        withSize(resolveTrackMeta(track).coverRaw, size),
+    [resolveTrackMeta],
+  );
 
   useLayoutEffect(() => {
     if (!isOpen || search.activeTab !== "queue" || search.query.trim()) {
@@ -222,7 +593,7 @@ const SearchModal: React.FC<SearchModalProps> = ({
         onClose();
       }
     } else {
-      const track = search.neteaseProvider.results[index];
+      const track = neteaseTracks[index];
       if (track) {
         playNeteaseTrack(track);
         onClose();
@@ -230,38 +601,40 @@ const SearchModal: React.FC<SearchModalProps> = ({
     }
   };
 
-  const playNeteaseTrack = (track: NeteaseTrackInfo) => {
+  const playNeteaseTrack = (track: NeteaseTrack) => {
     const origin = getNeteaseAudioUrl(track.id);
+    const meta = resolveTrackMeta(track);
     const song: Song = {
       id: track.id,
       title: track.title,
-      artist: track.artist,
-      coverUrl: track.coverUrl.replace("http:", "https:"),
+      artist: meta.artist,
+      coverUrl: resolveLargeCover(track),
       fileUrl: origin,
       source: "remote",
       origin,
       isNetease: true,
       neteaseId: track.neteaseId,
-      album: track.album,
+      album: meta.album,
       lyrics: [],
       needsLyricsMatch: true,
     };
     onImportAndPlay(song);
   };
 
-  const addNeteaseToQueue = (track: NeteaseTrackInfo) => {
+  const addNeteaseToQueue = (track: NeteaseTrack) => {
     const origin = getNeteaseAudioUrl(track.id);
+    const meta = resolveTrackMeta(track);
     const song: Song = {
       id: track.id,
       title: track.title,
-      artist: track.artist,
-      coverUrl: track.coverUrl.replace("http:", "https:"),
+      artist: meta.artist,
+      coverUrl: resolveLargeCover(track),
       fileUrl: origin,
       source: "remote",
       origin,
       isNetease: true,
       neteaseId: track.neteaseId,
-      album: track.album,
+      album: meta.album,
       lyrics: [],
       needsLyricsMatch: true,
     };
@@ -531,7 +904,7 @@ const SearchModal: React.FC<SearchModalProps> = ({
               )}
 
               {/* Results list */}
-              {search.neteaseProvider.results.length > 0 && (
+              {neteaseTracks.length > 0 && (
                 <>
                   {/* Floating Selection Background */}
                   {search.selectedIndex >= 0 && search.itemRefs.current[search.selectedIndex] && (
@@ -545,8 +918,14 @@ const SearchModal: React.FC<SearchModalProps> = ({
                     />
                   )}
 
-                  {search.neteaseProvider.results.map((track, idx) => {
+                  {neteaseTracks.map((track, idx) => {
                     const nowPlaying = search.isNowPlaying(track);
+                    const meta = resolveTrackMeta(track);
+                    const displayCover = meta.cover;
+                    // 副标题：歌手 / 专辑可能缺一个，只在两者都有时才显示分隔符
+                    const subtitle = [meta.artist, meta.album]
+                      .filter(Boolean)
+                      .join(" · ");
                     return (
                       <div
                         key={`${track.id}-${idx}`}
@@ -563,9 +942,9 @@ const SearchModal: React.FC<SearchModalProps> = ({
                                     `}
                       >
                         <div className="relative w-10 h-10 rounded-[6px] bg-white/5 overflow-hidden shrink-0 shadow-xs group-hover:shadow-lg transition-shadow duration-200">
-                          {track.coverUrl && (
+                          {displayCover && (
                             <SmartImage
-                              src={track.coverUrl}
+                              src={displayCover}
                               alt={track.title}
                               containerClassName="w-full h-full"
                               imgClassName={`w-full h-full object-cover transition-opacity ${nowPlaying ? "opacity-40 blur-[1px]" : ""}`}
@@ -607,12 +986,15 @@ const SearchModal: React.FC<SearchModalProps> = ({
                           <div
                             className={`text-[13px] truncate ${search.selectedIndex === idx ? "text-white/70" : "text-white/40"}`}
                           >
-                            {track.artist}{" "}
-                            <span className="opacity-50 mx-1">·</span>{" "}
-                            {track.album}
+                            {subtitle || "—"}
                           </div>
                         </div>
-                        <div className="px-2">
+                        <div className="flex items-center gap-2 px-2 shrink-0">
+                          {formatDuration(track.duration) && (
+                            <span className="text-[11px] tabular-nums text-white/30">
+                              {formatDuration(track.duration)}
+                            </span>
+                          )}
                           <span
                             className={`
                                             text-[10px] font-bold px-1.5 py-0.5 rounded border

@@ -1,11 +1,17 @@
 import { fetchJson } from "./utils";
 import { isMetadataLine } from "@aura-music/lyrics/parser/types";
 
-// Issue #9: the previous single instance (neteaseapi.gksm.store) returns 404
-// for some tracks when reached from a non-China egress, so keep an ordered
-// instance list and rotate on failure. zm.wwoyun.cn is hosted in China
-// (Ningbo), so overseas users still get a China egress through it.
-const API_BASES = ["https://zm.wwoyun.cn", "https://neteaseapi.gksm.store"];
+// 自建实例。原 neteaseapi.gksm.store 已 404，不再保留为兜底。
+const NETEASECLOUD_API_BASE = "https://netease-api.yearnplayground.dpdns.org";
+
+// 上线前确认：自建实例暴露的搜索路径是 /search，不是官方 NeteaseCloudMusicApi
+// 的 /cloudsearch。实例换成官方版时把这里改回 "/cloudsearch"。
+const NETEASE_SEARCH_PATH = "/search";
+
+const API_BASES = [NETEASECLOUD_API_BASE];
+// 想再加一层第三方兜底就解开下行（宁波机房，国内出口），但第三方实例随时可能重演 gksm 的 404：
+// const API_BASES = [NETEASECLOUD_API_BASE, "https://zm.wwoyun.cn"];
+
 const METING_API = "https://api.qijieya.cn/meting/";
 
 const requestApi = async (path: string): Promise<any> => {
@@ -20,7 +26,10 @@ const requestApi = async (path: string): Promise<any> => {
   }
   throw lastErr;
 };
-const TTML_DB_BASE = "https://amll-ttml-db.stevexmh.net";
+
+const TTML_DB_BASE = "/amll-lyrics";
+// 没有在 dev server / nginx 上配 /amll-lyrics 反代的话，改回直连官方库：
+// const TTML_DB_BASE = "https://amll-ttml-db.stevexmh.net";
 
 const TIMESTAMP_REGEX = /^\[(\d{2}):(\d{2})(?:[\.:](\d{2,3}))?\](.*)$/;
 
@@ -380,7 +389,7 @@ export const searchNetEase = async (
   options: SearchOptions = {},
 ): Promise<NeteaseTrackInfo[]> => {
   const { limit = 20, offset = 0 } = options;
-  const searchApiUrl = `/cloudsearch?keywords=${encodeURIComponent(
+  const searchApiUrl = `${NETEASE_SEARCH_PATH}?keywords=${encodeURIComponent(
     keyword,
   )}&limit=${limit}&offset=${offset}`;
 

@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test tests"
   },
-  "dependencies": {},
+  "dependencies": {
+    "workbox-window": "^7.4.1"
+  },
   "devDependencies": {
     "@aura-music/background": "workspace:*",
     "@aura-music/core": "workspace:*",
